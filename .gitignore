@@ -1,0 +1,35 @@
+    # Python cache
+    __pycache__/
+    *.pyc
+    *.pyo
+    *.pyd
+
+    # Build artifacts
+    build/
+    dist/
+    *.spec
+    *.pkg
+    *.toc
+    *.pyz
+    base_library.zip
+    xref-*.html
+    warn-*.txt
+
+    # Environment variables
+    .env
+
+    # Logs
+    *.log
+
+    # Session/Temporary files
+    session_info.txt
+
+    # OS generated files
+    .DS_Store
+    Thumbs.db
+
+    # Custom files
+    kyk_login_base.py
+    kyk_logout.py
+    building-prompt.txt
+    BENIOKU.txt
