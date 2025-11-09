@@ -2,37 +2,59 @@
 # =        KYK Wi-Fi Auto Login/Logout           =
 # ================================================
 #
-import requests
-import time
+from __future__ import annotations
+
+import itertools
 import logging
 import os
-from dotenv import load_dotenv # Guvenli giris bilgileri (.env dosyasi) icin
+import signal  # Ctrl+C sinyalini yakalamak icin
 import sys
-import itertools
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Optional, Tuple
+
+import requests
 from bs4 import BeautifulSoup
-import xml.etree.ElementTree as ET # XML analiz etmek icin alternatif
-import signal # Ctrl+C sinyalini yakalamak icin
+from dotenv import load_dotenv  # Guvenli giris bilgileri (.env dosyasi) icin
+import xml.etree.ElementTree as ET  # XML analiz etmek icin alternatif
 
 # --- Base Path Detection --- #
 # Determine the base path depending on whether the script is running as a bundled executable or a standard Python script.
-if getattr(sys, 'frozen', False):
-    # Running as a PyInstaller bundle (.exe)
-    executable_dir = os.path.dirname(sys.executable) # Directory containing the .exe
-    project_root = os.path.dirname(executable_dir) # Assumes .exe is in a subdir like 'dist'
-    base_path = executable_dir # Use the executable's dir for runtime files (.env, logs)
-else:
-    # Running as a standard Python script
-    project_root = os.path.dirname(os.path.abspath(__file__)) # Project root is script's dir
-    base_path = project_root # Runtime files are also in the script's dir
+
+
+@dataclass(frozen=True)
+class RuntimePaths:
+    """Holds runtime paths regardless of execution environment."""
+
+    base_path: Path
+    project_root: Path
+
+
+def detect_paths() -> RuntimePaths:
+    """Determine runtime directories for both script and bundled executions."""
+
+    if getattr(sys, "frozen", False):
+        executable_path = Path(sys.executable).resolve()
+        executable_dir = executable_path.parent
+        project_root = executable_dir.parent
+        base_path = executable_dir
+    else:
+        project_root = Path(__file__).resolve().parent
+        base_path = project_root
+    return RuntimePaths(base_path=base_path, project_root=project_root)
+
+
+PATHS = detect_paths()
 
 # --- Absolute Paths --- #
 # Define absolute paths for runtime files relative to the base path (exe/script location)
-DOTENV_PATH = os.path.join(base_path, '.env')
-SESSION_FILE_PATH = os.path.join(base_path, 'session_info.txt')
-FIRST_RUN_MARKER_PATH = os.path.join(base_path, '.ilk_calistirma_tamam')
-LOG_FILE_PATH = os.path.join(base_path, 'kyk_login.log')
+DOTENV_PATH = PATHS.base_path / ".env"
+SESSION_FILE_PATH = PATHS.base_path / "session_info.txt"
+FIRST_RUN_MARKER_PATH = PATHS.base_path / ".ilk_calistirma_tamam"
+LOG_FILE_PATH = PATHS.base_path / "kyk_login.log"
 # Define README path relative to the determined project root
-README_PATH = os.path.join(project_root, 'README.md')
+README_PATH = PATHS.project_root / "README.md"
 
 # Renkli konsol ciktilari icin (istege bagli)
 try:
@@ -52,8 +74,13 @@ except ImportError:
     # colorama kutuphanesi yoksa renk kullanilmaz
     print("Uyari: 'colorama' kutuphanesi yuklu degil. Renkli ciktilar gosterilemeyecek.")
     print("Lutfen 'pip install colorama' komutu ile yukleyin.")
-    class DummyColor:
-        def __getattr__(self, name): return ""
+    class DummyColor(str):
+        def __new__(cls) -> "DummyColor":  # type: ignore[misc]
+            return super().__new__(cls, "")
+
+        def __getattr__(self, name: str) -> str:
+            return ""
+
     R = Y = G = C = M = B = W = RS = BR = DummyColor()
     colorama = None
 
@@ -78,25 +105,39 @@ def signal_handler(sig, frame):
 
 # --- Bekleme Animasyonu --- #
 # Konsolda bekleme sirasinda gorsel bir isaret gosterir.
-def animated_sleep(duration, message="Bekleniyor...", color=W):
-    """Eger konsol penceresi varsa, bekleme sirasinda bir animasyon gosterir.
-       Ctrl+C'yi (signal flag ve msvcrt araciligiyla) yakalamaya calisir."""
-    global exit_requested # Access the global flag
-    if exit_requested: return True # Exit immediately if already requested
+def animated_sleep(duration: float, message: str = "Bekleniyor...", color: str | object = W) -> bool:
+    """Eger konsol penceresi varsa, bekleme sirasinda bir animasyon gosterir."""
+
+    global exit_requested  # Access the global flag
+    if exit_requested:
+        return True  # Exit immediately if already requested
 
     msvcrt_loaded = False
-    if sys.platform == 'win32':
+    if sys.platform == "win32":
         try:
-            import msvcrt
+            import msvcrt  # type: ignore
+
             msvcrt_loaded = True
         except ImportError:
             logging.debug("msvcrt module could not be imported on Windows.")
-            pass # Continue without msvcrt check if import fails
 
     if sys.stdout:
-        spinner = itertools.cycle(['-', '\\', '|', '/'])
-        end_time = time.time() + duration
-        turkish_chars = {'ı': 'i', 'İ': 'I', 'ğ': 'g', 'Ğ': 'G', 'ü': 'u', 'Ü': 'U', 'ş': 's', 'Ş': 'S', 'ö': 'o', 'Ö': 'O', 'ç': 'c', 'Ç': 'C'}
+        spinner = itertools.cycle(["-", "\\", "|", "/"])
+        end_time = time.monotonic() + duration
+        turkish_chars = {
+            "ı": "i",
+            "İ": "I",
+            "ğ": "g",
+            "Ğ": "G",
+            "ü": "u",
+            "Ü": "U",
+            "ş": "s",
+            "Ş": "S",
+            "ö": "o",
+            "Ö": "O",
+            "ç": "c",
+            "Ç": "C",
+        }
         ascii_message = message
         for tr, en in turkish_chars.items():
             ascii_message = ascii_message.replace(tr, en)
@@ -105,68 +146,68 @@ def animated_sleep(duration, message="Bekleniyor...", color=W):
         sys.stdout.write(formatted_message + " ")
 
         interrupted = False
-        while time.time() < end_time:
-            if exit_requested: # Check flag set by signal handler
+        while time.monotonic() < end_time:
+            if exit_requested:  # Check flag set by signal handler
                 logging.debug("Exit requested flag detected during animated_sleep.")
                 interrupted = True
                 break
 
             # Check for keyboard input using msvcrt on Windows (for .exe)
-            if msvcrt_loaded:
-                if msvcrt.kbhit():
-                    try:
-                        key = msvcrt.getch()
-                        if key == b'\x03': # Ctrl+C pressed
-                            logging.debug("Ctrl+C detected via msvcrt in animated_sleep.")
-                            exit_requested = True # Set the global flag
-                            interrupted = True
-                            break
-                    except Exception as e_msvcrt_get:
-                        # Log error reading key, but continue
-                        logging.debug(f"Error reading key with msvcrt: {e_msvcrt_get}")
+            if msvcrt_loaded and msvcrt.kbhit():  # type: ignore[name-defined]
+                try:
+                    key = msvcrt.getch()  # type: ignore[name-defined]
+                    if key == b"\x03":  # Ctrl+C pressed
+                        logging.debug("Ctrl+C detected via msvcrt in animated_sleep.")
+                        exit_requested = True  # Set the global flag
+                        interrupted = True
+                        break
+                except Exception as e_msvcrt_get:  # pragma: no cover - platform specific
+                    # Log error reading key, but continue
+                    logging.debug("Error reading key with msvcrt: %s", e_msvcrt_get)
 
             # Animation update
             sys.stdout.write(next(spinner))
             sys.stdout.flush()
 
             # Shorter sleep to be more responsive to Ctrl+C
-            check_interval = 0.1 # Check for input every 0.1s
-            remaining_time_in_loop = end_time - time.time()
-            sleep_this_iteration = min(check_interval, max(0, remaining_time_in_loop)) # Ensure non-negative sleep
+            check_interval = 0.1  # Check for input every 0.1s
+            remaining_time_in_loop = end_time - time.monotonic()
+            sleep_this_iteration = min(check_interval, max(0.0, remaining_time_in_loop))
             if sleep_this_iteration > 0:
                 time.sleep(sleep_this_iteration)
 
-            if not interrupted: # Avoid erasing the spinner char if interrupted
-                sys.stdout.write('\b')
+            if not interrupted:  # Avoid erasing the spinner char if interrupted
+                sys.stdout.write("\b")
 
         # Cleanup line after loop finishes or is interrupted
-        clear_len = len(ascii_message) + 10 # Adjusted length
-        sys.stdout.write('\r' + ' ' * clear_len + '\r')
+        clear_len = len(ascii_message) + 10  # Adjusted length
+        sys.stdout.write("\r" + " " * clear_len + "\r")
         sys.stdout.flush()
         # No extra message here, handler prints one
-        return interrupted # Return True if exit was requested during sleep
-    else:
-        # Non-console sleep, check flag periodically
-        start_time = time.time()
-        while time.time() < end_time:
-            if exit_requested: return True
-            sleep_chunk = min(0.2, max(0, end_time - time.time()))
-            if sleep_chunk > 0:
-                time.sleep(sleep_chunk) # Sleep in chunks
-        return exit_requested # Check one last time
+        return interrupted  # Return True if exit was requested during sleep
+
+    # Non-console sleep, check flag periodically
+    end_time = time.monotonic() + duration
+    while time.monotonic() < end_time:
+        if exit_requested:
+            return True
+        sleep_chunk = min(0.2, max(0.0, end_time - time.monotonic()))
+        if sleep_chunk > 0:
+            time.sleep(sleep_chunk)  # Sleep in chunks
+    return exit_requested  # Check one last time
 
 # --- Kullanici Bilgilerini Alma --- #
 # Program icin gerekli olan KYK kullanici adi ve sifresini alir.
 # Eger daha once kaydedilmisse, .env dosyasindan okur, degilse kullaniciya sorar.
-def get_credentials():
-    """Kullanici adi ve sifreyi .env dosyasindan veya kullanicidan alir.
-       Returns: username, password, source ('env' or 'user')"""
-    username = os.getenv('KYK_USERNAME')
-    password = os.getenv('KYK_PASSWORD')
-    source = 'env'
+def get_credentials() -> Tuple[Optional[str], Optional[str], str]:
+    """Kullanici adi ve sifreyi .env dosyasindan veya kullanicidan alir."""
+
+    username = os.getenv("KYK_USERNAME")
+    password = os.getenv("KYK_PASSWORD")
+    source = "env"
 
     if not username or not password:
-        source = 'user'
+        source = "user"
         print(f"{Y}Giris bilgileri .env dosyasinda bulunamadi veya .env dosyasi eksik.{RS}")
         # Reset both if either is missing
         username = None
@@ -202,6 +243,31 @@ FAST_AJAX_INTERVAL = 10 # Hizli oturumu acik tutma modunda kota kontrol araligi 
 RETRY_DELAY = 60 # Basarisiz giristen sonra yeniden deneme gecikmesi (saniye) - 1 dakika
 REQUEST_TIMEOUT = 30 # Internet istekleri icin zaman asimi suresi (saniye)
 
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0"
+)
+SEC_CH_UA = '"Microsoft Edge";v="135", "Not-A.Brand";v="8", "Chromium";v="135"'
+
+
+def compose_headers(**overrides: str) -> Dict[str, str]:
+    """Merge provided overrides with a shared base header configuration."""
+
+    base_headers: Dict[str, str] = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "tr,en;q=0.9,en-GB;q=0.8,en-US;q=0.7",
+        "Connection": "keep-alive",
+        "DNT": "1",
+        "sec-ch-ua": SEC_CH_UA,
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+    }
+    base_headers.update(overrides)
+    return base_headers
+
+
+QuotaResult = Tuple[Optional[Dict[str, str]] | str, Optional[str]]
+
 # --- Kayit (Loglama) Ayarlari --- #
 # Programin calisma adimlarinin ve hatalarin kaydedilmesi icin ayarlar.
 # Kayitlar hem konsola hem de 'kyk_login.log' dosyasina yazilir.
@@ -231,6 +297,7 @@ if logger.hasHandlers(): logger.handlers.clear()
 
 # Dosya Kayit Ayari (Renksiz)
 try:
+    LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(LOG_FILE_PATH, encoding='utf-8')
     file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(file_formatter)
@@ -257,25 +324,20 @@ if sys.stdout:
 # Programin temel gorevlerini yerine getiren fonksiyonlar.
 
 # KYK Wi-Fi Portalina Giris Islemi
-def login_attempt(session):
+def login_attempt(session: requests.Session) -> bool | str:
     """Verilen oturum (session) ile KYK Wi-Fi portalina giris yapmayi dener."""
     try:
         logging.info(f"Giris sayfasi aliniyor: {LOGIN_URL}")
-        headers_get = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'tr,en;q=0.9,en-GB;q=0.8,en-US;q=0.7',
-            'Connection': 'keep-alive',
-            'DNT': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Upgrade-Insecure-Requests': '1',
-            'sec-ch-ua': '"Microsoft Edge";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-        }
+        headers_get = compose_headers(
+            Accept="text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            **{
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Upgrade-Insecure-Requests': '1',
+            }
+        )
         response_get = session.get(LOGIN_URL, headers=headers_get, timeout=REQUEST_TIMEOUT, verify=True)
         response_get.raise_for_status()
         logging.info("Giris sayfasi basariyla alindi. Ilk cerezler (cookies) alindi.")
@@ -285,25 +347,20 @@ def login_attempt(session):
             'j_password': PASSWORD,
             'submit': 'Giris'
         }
-        headers_post = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'tr,en;q=0.9,en-GB;q=0.8,en-US;q=0.7',
-            'Cache-Control': 'max-age=0',
-            'Connection': 'keep-alive',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'DNT': '1',
-            'Origin': 'https://wifi.gsb.gov.tr',
-            'Referer': LOGIN_URL,
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'same-origin',
-            'Sec-Fetch-User': '?1',
-            'Upgrade-Insecure-Requests': '1',
-            'sec-ch-ua': '"Microsoft Edge";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-        }
+        headers_post = compose_headers(
+            Accept="text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            **{
+                'Cache-Control': 'max-age=0',
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Origin': 'https://wifi.gsb.gov.tr',
+                'Referer': LOGIN_URL,
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-User': '?1',
+                'Upgrade-Insecure-Requests': '1',
+            }
+        )
 
         logging.info(f"Giris bilgileri gonderiliyor: {CHECK_URL}")
         response_post = session.post(
@@ -393,25 +450,20 @@ def login_attempt(session):
         return False
 
 # Oturumun Aktif Kalmasi Icin Gerekli Bilgiyi (ViewState) Alma
-def get_initial_viewstate(session):
+def get_initial_viewstate(session: requests.Session) -> Optional[str]:
     """Basarili giristen sonra ana sayfadan ilk ViewState degerini alir."""
     try:
         logging.info(f"Basarili giris sayfasi ({SUCCESS_URL}) aliniyor (ViewState icin)...")
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'tr,en;q=0.9,en-GB;q=0.8,en-US;q=0.7',
-            'Connection': 'keep-alive',
-            'Referer': LOGIN_URL,
-            'DNT': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'same-origin',
-            'Upgrade-Insecure-Requests': '1',
-            'sec-ch-ua': '"Microsoft Edge";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-        }
+        headers = compose_headers(
+            Accept="text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            Referer=LOGIN_URL,
+            **{
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Upgrade-Insecure-Requests': '1',
+            }
+        )
         response = session.get(SUCCESS_URL, headers=headers, timeout=REQUEST_TIMEOUT, verify=True)
         response.raise_for_status()
 
@@ -440,32 +492,27 @@ def get_initial_viewstate(session):
         return None
 
 # Kota Bilgisini Internetten Sorgulama
-def get_quota_ajax(session, current_view_state):
+def get_quota_ajax(session: requests.Session, current_view_state: Optional[str]) -> QuotaResult:
     """Verilen ViewState ile AJAX kullanarak kota bilgisini sorgular."""
     if not current_view_state:
         logging.error("AJAX istegi icin ViewState mevcut degil.")
         return None, None
 
     logging.debug("Kota bilgisi icin AJAX istegi gonderiliyor...")
-    ajax_headers = {
-        'Accept': 'application/xml, text/xml, */*; q=0.01',
-        'Accept-Encoding': 'gzip, deflate, br, zstd',
-        'Accept-Language': 'tr,en;q=0.9,en-GB;q=0.8,en-US;q=0.7',
-        'Connection': 'keep-alive',
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'DNT': '1',
-        'Faces-Request': 'partial/ajax',
-        'Origin': 'https://wifi.gsb.gov.tr',
-        'Referer': SUCCESS_URL,
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0',
-        'X-Requested-With': 'XMLHttpRequest',
-        'sec-ch-ua': '"Microsoft Edge";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-    }
+    ajax_headers = compose_headers(
+        Accept="application/xml, text/xml, */*; q=0.01",
+        **{
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'Faces-Request': 'partial/ajax',
+            'Origin': 'https://wifi.gsb.gov.tr',
+            'Referer': SUCCESS_URL,
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'X-Requested-With': 'XMLHttpRequest',
+        }
+    )
     ajax_data = {
         'javax.faces.partial.ajax': 'true',
         'javax.faces.source': 'mainPanel:kota:j_idt122',
@@ -556,7 +603,7 @@ def get_quota_ajax(session, current_view_state):
         return None, current_view_state
 
 # KYK Wi-Fi Oturumunu Kapatma Islemi
-def perform_logout(jsessionid_value):
+def perform_logout(jsessionid_value: str) -> bool:
     """Verilen oturum kimligi (JSESSIONID) ile KYK Wi-Fi portalindan cikis yapmayi dener."""
     LOGOUT_URL = "https://wifi.gsb.gov.tr/login.html?logout=1"
     REQUEST_TIMEOUT = 20
@@ -568,20 +615,18 @@ def perform_logout(jsessionid_value):
 
     logging.info(f"(Logout) JSESSIONID ile oturum kapatilmaya calisiliyor: ...{jsessionid_value[-6:]}")
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Connection': 'keep-alive',
-            'Cookie': f'JSESSIONID={jsessionid_value}'
-        }
+        headers = compose_headers(
+            Accept="text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            **{'Cookie': f'JSESSIONID={jsessionid_value}'}
+        )
         response = requests.get(LOGOUT_URL, headers=headers, timeout=REQUEST_TIMEOUT, verify=True)
         response.raise_for_status()
 
         if SUCCESS_MESSAGE_FRAGMENT in response.text:
              logging.info("(Logout) Cikis basarili! Sunucu onay mesaji dondu.")
              try:
-                 if os.path.exists(SESSION_FILE_PATH):
-                     os.remove(SESSION_FILE_PATH)
+                 if SESSION_FILE_PATH.exists():
+                     SESSION_FILE_PATH.unlink()
                      logging.info(f"(Logout) Oturum dosyasi silindi: {SESSION_FILE_PATH}")
              except Exception as e:
                  logging.warning(f"(Logout) Oturum dosyasi {SESSION_FILE_PATH} silinemedi: {e}")
@@ -590,8 +635,8 @@ def perform_logout(jsessionid_value):
              logging.warning("(Logout) Cikis istegi gonderildi (Yanit Kodu 200 OK), ancak onay mesaji yanitta bulunamadi.")
              logging.warning("(Logout) Oturum buyuk ihtimalle sunucu tarafindan sonlandirildi, ancak dogrulanamadi.")
              try:
-                 if os.path.exists(SESSION_FILE_PATH):
-                     os.remove(SESSION_FILE_PATH)
+                 if SESSION_FILE_PATH.exists():
+                     SESSION_FILE_PATH.unlink()
                      logging.info(f"(Logout) Oturum dosyasi (dogrulanamasa da) silindi: {SESSION_FILE_PATH}")
              except Exception as e:
                  logging.warning(f"(Logout) Oturum dosyasi {SESSION_FILE_PATH} silinemedi: {e}")
@@ -611,7 +656,7 @@ def perform_logout(jsessionid_value):
         return False
 
 # --- Giris Bilgilerini Degistirme Islevi ---
-def handle_credential_change(current_session):
+def handle_credential_change(current_session: requests.Session) -> requests.Session:
     """Kullanicidan yeni giris bilgileri alir, .env dosyasini gunceller, global degiskenleri ayarlar ve mevcut oturumu sonlandirir."""
     global USERNAME, PASSWORD, logged_in, last_view_state, login_attempts, session # Declare globals we modify
 
@@ -647,9 +692,8 @@ def handle_credential_change(current_session):
             jsessionid_to_logout = current_session.cookies.get('JSESSIONID')
             if not jsessionid_to_logout:
                 try:
-                    if os.path.exists(SESSION_FILE_PATH):
-                        with open(SESSION_FILE_PATH, "r") as f_sess:
-                            jsessionid_to_logout = f_sess.read().strip()
+                    if SESSION_FILE_PATH.exists():
+                        jsessionid_to_logout = SESSION_FILE_PATH.read_text(encoding="utf-8").strip()
                 except Exception as e_read_sess:
                     logging.warning(f"Oturum kapatma icin {SESSION_FILE_PATH} okunurken hata: {e_read_sess}")
 
@@ -712,7 +756,7 @@ if __name__ == "__main__":
     # Program ilk kez calistiriliyorsa, kullanim kilavuzunu acmayi onerir.
     first_run_marker = FIRST_RUN_MARKER_PATH
     try:
-        if not os.path.exists(first_run_marker):
+        if not first_run_marker.exists():
             print(f"{Y}\n--------------------------------------------------------{RS}")
             readme_prompt = input(f" {Y}Programi ilk kez calistiriyorsunuz. \n {W}Kullanim kilavuzunu (README.md) acmak ister misiniz? (Y/N):{RS} ").strip().lower()
             print(f"{Y}--------------------------------------------------------\n{RS}")
@@ -720,16 +764,16 @@ if __name__ == "__main__":
             if readme_prompt in ['e', 'evet', 'y', 'yes']:
                 try:
                     readme_path = README_PATH
-                    if os.path.exists(readme_path):
-                        absolute_readme_path = os.path.abspath(readme_path)
+                    if readme_path.exists():
+                        absolute_readme_path = readme_path.resolve()
                         print(f"{C}'{absolute_readme_path}' acilmaya calisiliyor...{RS}")
                         if sys.platform == 'win32':
-                            os.startfile(absolute_readme_path)
+                            os.startfile(str(absolute_readme_path))
                         else:
                              try:
                                  import subprocess
-                                 if sys.platform == 'darwin': subprocess.call(('open', absolute_readme_path))
-                                 else: subprocess.call(('xdg-open', absolute_readme_path))
+                                 if sys.platform == 'darwin': subprocess.call(('open', str(absolute_readme_path)))
+                                 else: subprocess.call(('xdg-open', str(absolute_readme_path)))
                              except (OSError, ImportError):
                                  print(f"{R}Hata: Bu isletim sisteminde dosya otomatik acilamiyor. Lutfen {readme_path} dosyasini manuel olarak acin.{RS}")
                     else:
@@ -739,13 +783,13 @@ if __name__ == "__main__":
                     logging.debug("BENIOKU acma hatasi:", exc_info=True)
 
             try:
-                with open(first_run_marker, 'w') as f_marker: f_marker.write(time.strftime("%Y-%m-%d %H:%M:%S"))
+                first_run_marker.write_text(time.strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8")
                 logging.debug(f"Ilk calistirma isaretcisi ({first_run_marker}) olusturuldu.")
                 if sys.platform == 'win32':
                     try:
                         import ctypes
                         FILE_ATTRIBUTE_HIDDEN = 0x02
-                        ctypes.windll.kernel32.SetFileAttributesW(first_run_marker, FILE_ATTRIBUTE_HIDDEN)
+                        ctypes.windll.kernel32.SetFileAttributesW(str(first_run_marker), FILE_ATTRIBUTE_HIDDEN)
                         logging.debug(f"Ilk calistirma isaretcisi gizlendi (Windows).")
                     except Exception as hide_err:
                         logging.warning(f"Isaretci dosyasi ('{first_run_marker}') gizlenirken hata olustu: {hide_err}")
@@ -1245,9 +1289,8 @@ if __name__ == "__main__":
                     jsessionid_to_logout = session.cookies.get('JSESSIONID')
                     if not jsessionid_to_logout:
                         try:
-                            if os.path.exists(SESSION_FILE_PATH):
-                                with open(SESSION_FILE_PATH, "r") as f:
-                                    jsessionid_to_logout = f.read().strip()
+                            if SESSION_FILE_PATH.exists():
+                                jsessionid_to_logout = SESSION_FILE_PATH.read_text(encoding="utf-8").strip()
                         except Exception as e_read:
                             logging.error(f"{SESSION_FILE_PATH} dosyasi logout icin okunurken hata: {e_read}", exc_info=False)
                             logging.debug("Oturum dosyasi okuma hatasi (Logout):", exc_info=True)
@@ -1310,9 +1353,8 @@ if __name__ == "__main__":
              jsessionid_to_logout = session.cookies.get('JSESSIONID')
              if not jsessionid_to_logout:
                   try:
-                      if os.path.exists(SESSION_FILE_PATH):
-                           with open(SESSION_FILE_PATH, "r") as f:
-                                jsessionid_to_logout = f.read().strip()
+                      if SESSION_FILE_PATH.exists():
+                           jsessionid_to_logout = SESSION_FILE_PATH.read_text(encoding="utf-8").strip()
                   except Exception as e_final_read:
                        logging.warning(f"{SESSION_FILE_PATH} dosyasi finalde okunurken hata: {e_final_read}")
 
@@ -1331,8 +1373,8 @@ if __name__ == "__main__":
 
         if not exit_without_logout:
              try:
-                  if os.path.exists(SESSION_FILE_PATH):
-                       os.remove(SESSION_FILE_PATH)
+                  if SESSION_FILE_PATH.exists():
+                       SESSION_FILE_PATH.unlink()
                        logging.debug(f"Cikista oturum bilgi dosyasi ({SESSION_FILE_PATH}) temizlendi.")
              except OSError as e:
                   logging.warning(f"Cikista oturum bilgi dosyasi ({SESSION_FILE_PATH}) silinirken hata: {e}", exc_info=False)
